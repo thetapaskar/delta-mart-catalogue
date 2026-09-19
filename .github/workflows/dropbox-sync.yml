@@ -1,0 +1,173 @@
+name: Sync Delta Mart Images from Dropbox
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync Dropbox images
+        env:
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+        run: |
+          python3 <<'PY'
+          import os
+          import json
+          import urllib.request
+          import urllib.parse
+          import base64
+          from pathlib import Path
+
+          APP_KEY = os.environ["DROPBOX_APP_KEY"]
+          APP_SECRET = os.environ["DROPBOX_APP_SECRET"]
+          REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
+
+          DROPBOX_FOLDER = "/Blogger/Website catalogue/Catalogue/archive/kurta_images_and_annotations/FINAL_KURTA"
+          LOCAL_FOLDER = Path("images")
+          LOCAL_FOLDER.mkdir(exist_ok=True)
+
+          # --------------------------------------------------
+          # 1. Get a fresh Dropbox access token
+          # --------------------------------------------------
+          credentials = base64.b64encode(
+              f"{APP_KEY}:{APP_SECRET}".encode()
+          ).decode()
+
+          token_data = urllib.parse.urlencode({
+              "grant_type": "refresh_token",
+              "refresh_token": REFRESH_TOKEN
+          }).encode()
+
+          token_request = urllib.request.Request(
+              "https://api.dropboxapi.com/oauth2/token",
+              data=token_data,
+              headers={
+                  "Authorization": f"Basic {credentials}",
+                  "Content-Type": "application/x-www-form-urlencoded"
+              },
+              method="POST"
+          )
+
+          with urllib.request.urlopen(token_request) as response:
+              token_result = json.load(response)
+
+          ACCESS_TOKEN = token_result["access_token"]
+
+          print("Dropbox access token refreshed successfully.")
+
+          # --------------------------------------------------
+          # 2. List Dropbox files
+          # --------------------------------------------------
+          headers = {
+              "Authorization": f"Bearer {ACCESS_TOKEN}",
+              "Content-Type": "application/json"
+          }
+
+          files = []
+
+          body = json.dumps({
+              "path": DROPBOX_FOLDER,
+              "recursive": False,
+              "include_media_info": False,
+              "include_deleted": False
+          }).encode()
+
+          request = urllib.request.Request(
+              "https://api.dropboxapi.com/2/files/list_folder",
+              data=body,
+              headers=headers,
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request) as response:
+              result = json.load(response)
+
+          files.extend(result["entries"])
+
+          while result.get("has_more"):
+              cursor_body = json.dumps({
+                  "cursor": result["cursor"]
+              }).encode()
+
+              cursor_request = urllib.request.Request(
+                  "https://api.dropboxapi.com/2/files/list_folder/continue",
+                  data=cursor_body,
+                  headers=headers,
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(cursor_request) as response:
+                  result = json.load(response)
+
+              files.extend(result["entries"])
+
+          # --------------------------------------------------
+          # 3. Download product images
+          # --------------------------------------------------
+          image_count = 0
+
+          for entry in files:
+
+              if entry.get(".tag") != "file":
+                  continue
+
+              name = entry["name"]
+
+              if not name.lower().endswith(
+                  (".jpg", ".jpeg", ".png", ".webp")
+              ):
+                  continue
+
+              local_file = LOCAL_FOLDER / name
+
+              print(f"Syncing: {name}")
+
+              download_headers = {
+                  "Authorization": f"Bearer {ACCESS_TOKEN}",
+                  "Dropbox-API-Arg": json.dumps({
+                      "path": entry["path_lower"]
+                  })
+              }
+
+              download_request = urllib.request.Request(
+                  "https://content.dropboxapi.com/2/files/download",
+                  headers=download_headers,
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(download_request) as response:
+                  data = response.read()
+
+              local_file.write_bytes(data)
+
+              image_count += 1
+
+          print(f"Dropbox images synced: {image_count}")
+
+          PY
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "Delta Mart Catalogue Bot"
+          git config user.email "actions@users.noreply.github.com"
+
+          git add images/
+
+          if git diff --cached --quiet; then
+            echo "No image changes detected."
+          else
+            git commit -m "Sync product images from Dropbox"
+            git push
+          fi
