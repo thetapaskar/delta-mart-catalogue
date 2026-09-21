@@ -1,4 +1,4 @@
-name: Sync Delta Mart Images from Dropbox
+name: Sync Delta Mart Catalogue from Dropbox
 
 on:
   workflow_dispatch:
@@ -13,34 +13,66 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # --------------------------------------------------
+      # 1. Checkout GitHub repository
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Sync Dropbox images
+      # --------------------------------------------------
+      # 2. Sync Dropbox catalogue
+      # --------------------------------------------------
+      - name: Sync Dropbox catalogue
         env:
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+
         run: |
+
           python3 <<'PY'
+
           import os
           import json
+          import csv
+          import html
           import urllib.request
           import urllib.parse
           import base64
           from pathlib import Path
 
+
+          # --------------------------------------------------
+          # Configuration
+          # --------------------------------------------------
+
           APP_KEY = os.environ["DROPBOX_APP_KEY"]
           APP_SECRET = os.environ["DROPBOX_APP_SECRET"]
           REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
 
-          DROPBOX_FOLDER = "/Blogger/Website catalogue/Catalogue/archive/kurta_images_and_annotations/FINAL_KURTA"
-          LOCAL_FOLDER = Path("images")
-          LOCAL_FOLDER.mkdir(exist_ok=True)
+          DROPBOX_IMAGE_FOLDER = (
+              "/Blogger/Website catalogue/Catalogue/"
+              "archive/kurta_images_and_annotations/FINAL_KURTA"
+          )
+
+          DROPBOX_CSV_FILE = (
+              "/Blogger/Website catalogue/Catalogue/"
+              "archive/kurta_attributes.csv"
+          )
+
+          LOCAL_IMAGE_FOLDER = Path("images")
+          PRODUCTS_FILE = Path("products.json")
+
+          LOCAL_IMAGE_FOLDER.mkdir(exist_ok=True)
+
 
           # --------------------------------------------------
-          # 1. Get a fresh Dropbox access token
+          # 3. Get fresh Dropbox access token
           # --------------------------------------------------
+
+          print("Getting fresh Dropbox access token...")
+
           credentials = base64.b64encode(
               f"{APP_KEY}:{APP_SECRET}".encode()
           ).decode()
@@ -67,107 +99,332 @@ jobs:
 
           print("Dropbox access token refreshed successfully.")
 
+
           # --------------------------------------------------
-          # 2. List Dropbox files
+          # 4. Download product CSV from Dropbox
           # --------------------------------------------------
-          headers = {
+
+          print("Downloading product database from Dropbox...")
+
+          csv_headers = {
+              "Authorization": f"Bearer {ACCESS_TOKEN}",
+              "Dropbox-API-Arg": json.dumps({
+                  "path": DROPBOX_CSV_FILE
+              })
+          }
+
+          csv_request = urllib.request.Request(
+              "https://content.dropboxapi.com/2/files/download",
+              headers=csv_headers,
+              method="POST"
+          )
+
+          with urllib.request.urlopen(csv_request) as response:
+              csv_data = response.read().decode("utf-8-sig")
+
+          print(
+              f"Product CSV downloaded successfully: "
+              f"{len(csv_data)} characters"
+          )
+
+
+          # --------------------------------------------------
+          # 5. Generate full products.json
+          # --------------------------------------------------
+
+          print("Generating full product database...")
+
+          reader = csv.DictReader(csv_data.splitlines())
+
+          products = []
+
+          for row in reader:
+
+              product_id = (row.get("Product ID") or "").strip()
+
+              if not product_id:
+                  continue
+
+
+              def clean(value):
+
+                  value = (value or "").strip()
+
+                  if not value:
+                      return ""
+
+                  return html.unescape(value)
+
+
+              try:
+
+                  price = int(
+                      float(
+                          (row.get("Price") or "0").strip()
+                      )
+                  )
+
+              except ValueError:
+
+                  price = 0
+
+
+              product = {
+
+                  "id": product_id,
+
+                  "name": clean(
+                      row.get("Description")
+                  ),
+
+                  "price": price,
+
+                  "colour": clean(
+                      row.get("Color")
+                  ),
+
+                  "fabric": clean(
+                      row.get("Fabric")
+                  ),
+
+                  "fabricPurity": clean(
+                      row.get("Fabric Purity")
+                  ),
+
+                  "sleeve": clean(
+                      row.get("Sleeve")
+                  ),
+
+                  "shape": clean(
+                      row.get("Shape")
+                  ),
+
+                  "neck": clean(
+                      row.get("Neck")
+                  ),
+
+                  "printPattern": clean(
+                      row.get("Print or Pattern Type")
+                  ),
+
+                  "slitDetail": clean(
+                      row.get("Slit Detail")
+                  ),
+
+                  "length": clean(
+                      row.get("Length")
+                  ),
+
+                  "hemline": clean(
+                      row.get("Hemline")
+                  ),
+
+                  "image":
+                      f"https://cdn.jsdelivr.net/gh/"
+                      f"thetapaskar/delta-mart-catalogue@main/"
+                      f"images/{product_id}.jpg"
+              }
+
+              products.append(product)
+
+
+          # Save JSON database
+
+          PRODUCTS_FILE.write_text(
+              json.dumps(
+                  products,
+                  ensure_ascii=False,
+                  indent=2
+              ),
+              encoding="utf-8"
+          )
+
+
+          print(
+              f"Product database generated: "
+              f"{len(products)} products"
+          )
+
+
+          # --------------------------------------------------
+          # 6. List all Dropbox image files
+          # --------------------------------------------------
+
+          print("Getting Dropbox image list...")
+
+          api_headers = {
               "Authorization": f"Bearer {ACCESS_TOKEN}",
               "Content-Type": "application/json"
           }
 
           files = []
 
-          body = json.dumps({
-              "path": DROPBOX_FOLDER,
+          list_body = json.dumps({
+              "path": DROPBOX_IMAGE_FOLDER,
               "recursive": False,
               "include_media_info": False,
               "include_deleted": False
           }).encode()
 
-          request = urllib.request.Request(
+
+          list_request = urllib.request.Request(
               "https://api.dropboxapi.com/2/files/list_folder",
-              data=body,
-              headers=headers,
+              data=list_body,
+              headers=api_headers,
               method="POST"
           )
 
-          with urllib.request.urlopen(request) as response:
+
+          with urllib.request.urlopen(list_request) as response:
+
               result = json.load(response)
+
 
           files.extend(result["entries"])
 
+
+          # Continue pagination if necessary
+
           while result.get("has_more"):
+
               cursor_body = json.dumps({
                   "cursor": result["cursor"]
               }).encode()
 
+
               cursor_request = urllib.request.Request(
                   "https://api.dropboxapi.com/2/files/list_folder/continue",
                   data=cursor_body,
-                  headers=headers,
+                  headers=api_headers,
                   method="POST"
               )
 
+
               with urllib.request.urlopen(cursor_request) as response:
+
                   result = json.load(response)
+
 
               files.extend(result["entries"])
 
+
+          print(
+              f"Dropbox entries found: "
+              f"{len(files)}"
+          )
+
+
           # --------------------------------------------------
-          # 3. Download product images
+          # 7. Download product images
           # --------------------------------------------------
+
           image_count = 0
+
 
           for entry in files:
 
               if entry.get(".tag") != "file":
                   continue
 
+
               name = entry["name"]
+
 
               if not name.lower().endswith(
                   (".jpg", ".jpeg", ".png", ".webp")
               ):
                   continue
 
-              local_file = LOCAL_FOLDER / name
+
+              local_file = LOCAL_IMAGE_FOLDER / name
+
 
               print(f"Syncing: {name}")
 
+
               download_headers = {
-                  "Authorization": f"Bearer {ACCESS_TOKEN}",
-                  "Dropbox-API-Arg": json.dumps({
-                      "path": entry["path_lower"]
-                  })
+
+                  "Authorization":
+                      f"Bearer {ACCESS_TOKEN}",
+
+                  "Dropbox-API-Arg":
+                      json.dumps({
+                          "path": entry["path_lower"]
+                      })
               }
 
+
               download_request = urllib.request.Request(
+
                   "https://content.dropboxapi.com/2/files/download",
+
                   headers=download_headers,
+
                   method="POST"
               )
 
-              with urllib.request.urlopen(download_request) as response:
+
+              with urllib.request.urlopen(
+                  download_request
+              ) as response:
+
                   data = response.read()
+
 
               local_file.write_bytes(data)
 
               image_count += 1
 
-          print(f"Dropbox images synced: {image_count}")
+
+          print(
+              f"Dropbox images synced: "
+              f"{image_count}"
+          )
+
+
+          # --------------------------------------------------
+          # 8. Final information
+          # --------------------------------------------------
+
+          print(
+              "Catalogue synchronization completed."
+          )
+
+          print(
+              f"Products: {len(products)}"
+          )
+
+          print(
+              f"Images: {image_count}"
+          )
+
 
           PY
 
+
+      # --------------------------------------------------
+      # 9. Commit catalogue and images
+      # --------------------------------------------------
       - name: Commit and push changes
         run: |
+
           git config user.name "Delta Mart Catalogue Bot"
+
           git config user.email "actions@users.noreply.github.com"
 
-          git add images/
+
+          git add images/ products.json
+
 
           if git diff --cached --quiet; then
-            echo "No image changes detected."
+
+            echo "No catalogue changes detected."
+
           else
-            git commit -m "Sync product images from Dropbox"
+
+            git commit \
+              -m "Sync Delta Mart catalogue and images"
+
             git push
+
           fi
